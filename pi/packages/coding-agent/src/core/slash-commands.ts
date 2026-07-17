@@ -74,15 +74,17 @@ export const JARVIS_BLOCKED_BUILTIN_SLASH_COMMANDS: ReadonlyArray<JarvisBlockedB
 		message: "Context compaction is disabled in JARVIS Code.",
 	},
 ];
-
 export const BUILTIN_SLASH_COMMANDS: ReadonlyArray<BuiltinSlashCommand> = [
+	{ name: "project", description: "List and switch active projects" },
+	{ name: "switch", description: "Switch to a project by name or from a list" },
+	{ name: "status", description: "Show JARVIS sidecar and active project status" },
+	{ name: "register", description: "Register current directory or a path with JARVIS memory" },
 	{ name: "settings", description: "Open settings menu" },
 	{ name: "copy", description: "Copy last agent message to clipboard" },
 	{ name: "hotkeys", description: "Show all keyboard shortcuts" },
 	{ name: "reload", description: "Reload keybindings, extensions, skills, prompts, and themes" },
 	{ name: "quit", description: `Quit ${APP_NAME}` },
 ];
-
 export function matchesBuiltinSlashCommand(text: string, commandName: string): boolean {
 	const trimmed = text.trim();
 	const prefix = `/${commandName}`;

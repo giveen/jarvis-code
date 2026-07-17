@@ -148,6 +148,61 @@ DEFAULT_PROVIDER_CONFIG: dict[str, Any] = {
     }
 }
 
+# ---------------------------------------------------------------------------
+# Nous Research token auto-refresh
+# ---------------------------------------------------------------------------
+
+_NOUS_ENV_NAME = "NOUS_INFERENCE_KEY"
+# Cache: avoid calling hermes-agent on every credential load.
+# (called on every model-setting open, validate, and apply)
+_NOUS_REFRESH_INTERVAL_S = 300  # 5 min
+_NOUS_LAST_REFRESH_AT: float = 0
+
+
+def _maybe_refresh_nous_token(raw: dict[str, Any]) -> None:
+    """Ensure we have a fresh Nous Research access token.
+
+    If credentials already contain a key, refresh it from hermes-agent when
+    near expiry.  If no key exists, attempt a silent resolve — hermes-agent
+    may have a cached OAuth session from a previous login, and if so we
+    pick up the token without any interactive flow.
+
+    Rate-limited to one attempt per 5 minutes.
+    """
+    import time as _time
+
+    global _NOUS_LAST_REFRESH_AT
+    now = _time.time()
+
+    # Rate-limit: skip if we checked recently
+    if now - _NOUS_LAST_REFRESH_AT < _NOUS_REFRESH_INTERVAL_S:
+        return
+    _NOUS_LAST_REFRESH_AT = now
+
+    env_map = raw.setdefault("env", {})
+    if not isinstance(env_map, dict):
+        raw["env"] = {}
+        env_map = raw["env"]
+
+    existing = str(env_map.get(_NOUS_ENV_NAME, "") or "")
+
+    # Try to resolve from hermes-agent (works with cached OAuth or
+    # existing token refresh — never opens a browser)
+    try:
+        import importlib
+
+        hermes_auth = importlib.import_module("hermes_cli.auth")
+        fresh = hermes_auth.resolve_nous_access_token()
+        if fresh and str(fresh).strip():
+            env_map[_NOUS_ENV_NAME] = str(fresh)
+            # Persist so the next process load sees the fresh value
+            write_credentials(raw)
+    except Exception:
+        # hermes-agent not installed, not logged in, or network error —
+        # fall through and let the provider call 401 naturally; the user
+        # can still run `jarvis nous-login` interactively.
+        pass
+
 
 def _repo_root() -> Path:
     """Repository root for this checkout. Sidecar lives at
@@ -438,6 +493,10 @@ def write_credentials(raw: dict[str, Any]) -> None:
 
 def load_credentials_into_env() -> dict[str, str]:
     raw = load_credentials()
+
+    # Auto-refresh Nous token from hermes-agent if configured
+    _maybe_refresh_nous_token(raw)
+
     env_map = raw.get("env")
     if not isinstance(env_map, dict):
         return {}

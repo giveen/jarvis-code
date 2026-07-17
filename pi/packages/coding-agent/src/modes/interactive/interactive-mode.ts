@@ -26,6 +26,7 @@ import type {
 	MarkdownTheme,
 	OverlayHandle,
 	OverlayOptions,
+	SelectItem,
 	SlashCommand,
 } from "@earendil-works/pi-tui";
 import {
@@ -40,6 +41,7 @@ import {
 	Markdown,
 	matchesKey,
 	ProcessTerminal,
+	SelectList,
 	Spacer,
 	setKeybindings,
 	Text,
@@ -122,6 +124,7 @@ import { TreeSelectorComponent } from "./components/tree-selector.js";
 import { UserMessageComponent } from "./components/user-message.js";
 import { UserMessageSelectorComponent } from "./components/user-message-selector.js";
 import {
+	getSelectListTheme,
 	getAvailableThemes,
 	getAvailableThemesWithPaths,
 	getEditorTheme,
@@ -2688,6 +2691,28 @@ export class InteractiveMode {
 				this.editor.setText("");
 				return;
 			}
+			if (text === "/project") {
+				this.editor.setText("");
+				await this.showProjectSelector();
+				return;
+			}
+			if (text === "/switch" || text.startsWith("/switch ")) {
+				this.editor.setText("");
+				const projectName = text.startsWith("/switch ") ? text.slice(8).trim() : undefined;
+				await this.handleSwitchCommand(projectName);
+				return;
+			}
+			if (text === "/status") {
+				this.editor.setText("");
+				await this.showStatusView();
+				return;
+			}
+			if (text === "/register" || text.startsWith("/register ")) {
+				this.editor.setText("");
+				const registerPath = text.startsWith("/register ") ? text.slice(10).trim() : undefined;
+				await this.handleRegisterCommand(registerPath);
+				return;
+			}
 			if (text === "/scoped-models") {
 				this.editor.setText("");
 				await this.showModelsSelector();
@@ -4489,6 +4514,155 @@ export class InteractiveMode {
 			);
 			return { component: selector, focus: selector.getSettingsList() };
 		});
+	}
+
+	private async showProjectSelector(): Promise<void> {
+		const sidecarUrl = process.env.JARVIS_SIDECAR_URL ?? "http://127.0.0.1:8765";
+		const pairId = process.env.JARVIS_PAIR_ID?.trim();
+		const headers: Record<string, string> = {};
+		if (pairId) headers["X-Jarvis-Pair"] = pairId;
+		try {
+			const response = await fetch(`${sidecarUrl}/projects`, { method: "GET", headers: Object.keys(headers).length > 0 ? headers : undefined });
+			if (!response.ok) {
+				const body = await response.text().catch(() => "(no body)");
+				this.showWarning(`Sidecar error: ${response.status} — ${body.slice(0, 200)}`);
+				return;
+			}
+			const data = (await response.json()) as {
+				ok?: boolean;
+				projects?: Array<{ project_id: string; name: string; slug?: string; path: string; code_path?: string | null }>;
+			};
+			if (!data.ok || !data.projects || data.projects.length === 0) {
+				this.showWarning("No projects registered. Use /register to add one.");
+				return;
+			}
+
+			const items: SelectItem[] = data.projects.map((p) => ({
+				value: p.slug ?? p.name,
+				label: p.name,
+				description: p.path,
+			}));
+
+			this.showSelector((done) => {
+				const list = new SelectList(items, Math.min(items.length, 10), getSelectListTheme());
+				list.onCancel = () => done();
+				list.onSelect = async (item) => {
+					done();
+					try {
+						const switchHeaders: Record<string, string> = { "content-type": "application/json" };
+						if (pairId) switchHeaders["X-Jarvis-Pair"] = pairId;
+						const switchRes = await fetch(`${sidecarUrl}/switch_project`, {
+							method: "POST",
+							headers: switchHeaders,
+							body: JSON.stringify({ slug_or_name: item.value, auto_create: false }),
+						});
+						const switchData = (await switchRes.json()) as { ok?: boolean; name?: string; error?: string; warnings?: string[] };
+						if (switchData.ok) {
+							this.showStatus(`Switched to project: ${switchData.name ?? item.label}`);
+						} else {
+							this.showWarning(switchData.error ?? `Failed to switch to ${item.label}`);
+						}
+					} catch (err) {
+						this.showError(`Failed to switch project: ${err instanceof Error ? err.message : String(err)}`);
+					}
+				};
+				return { component: list, focus: list };
+			});
+		} catch (err) {
+			this.showError(`Failed to list projects: ${err instanceof Error ? err.message : String(err)}`);
+		}
+	}
+
+	private async handleSwitchCommand(projectName?: string): Promise<void> {
+		const sidecarUrl = process.env.JARVIS_SIDECAR_URL ?? "http://127.0.0.1:8765";
+		const pairId = process.env.JARVIS_PAIR_ID?.trim();
+		if (!projectName) {
+			await this.showProjectSelector();
+			return;
+		}
+
+		try {
+			const headers: Record<string, string> = { "content-type": "application/json" };
+			if (pairId) headers["X-Jarvis-Pair"] = pairId;
+			const response = await fetch(`${sidecarUrl}/switch_project`, {
+				method: "POST",
+				headers,
+				body: JSON.stringify({ slug_or_name: projectName, auto_create: false }),
+			});
+			const data = (await response.json()) as { ok?: boolean; name?: string; error?: string; warnings?: string[] };
+			if (data.ok) {
+				this.showStatus(`Switched to project: ${data.name ?? projectName}`);
+			} else {
+				this.showWarning(data.error ?? `Failed to switch to "${projectName}"`);
+			}
+		} catch (err) {
+			this.showError(`Failed to switch project: ${err instanceof Error ? err.message : String(err)}`);
+		}
+	}
+
+	private async showStatusView(): Promise<void> {
+		const sidecarUrl = process.env.JARVIS_SIDECAR_URL ?? "http://127.0.0.1:8765";
+		const pairId = process.env.JARVIS_PAIR_ID?.trim();
+		const headers: Record<string, string> = {};
+		if (pairId) headers["X-Jarvis-Pair"] = pairId;
+		let healthy = false;
+		let statusData: Record<string, unknown> | undefined;
+		try {
+			const healthRes = await fetch(`${sidecarUrl}/health`, { method: "GET" });
+			healthy = healthRes.ok;
+			if (healthy) {
+				const statusRes = await fetch(`${sidecarUrl}/status`, {
+					method: "GET",
+					headers: Object.keys(headers).length > 0 ? headers : undefined,
+				});
+				if (statusRes.ok) statusData = (await statusRes.json()) as Record<string, unknown>;
+			}
+		} catch {
+			// sidecar unreachable
+		}
+
+		this.chatContainer.addChild(new Spacer(1));
+		this.chatContainer.addChild(new Text(theme.fg("accent", "── JARVIS Status ──"), 1, 0));
+		this.chatContainer.addChild(new Text(`Sidecar:  ${healthy ? theme.fg("success", "running") : theme.fg("error", "unreachable")}`, 1, 0));
+		if (statusData) {
+			const activeProjectPath = statusData["active_project_path"] as string | undefined;
+			this.chatContainer.addChild(new Text(`Project:   ${activeProjectPath ? theme.fg("accent", activeProjectPath) : theme.fg("muted", "none active")}`, 1, 0));
+			const registryProjectCount = statusData["registry_project_count"];
+			if (typeof registryProjectCount === "number") {
+				this.chatContainer.addChild(new Text(`Registry:  ${registryProjectCount} project(s)`, 1, 0));
+			}
+			const agentLoaded = statusData["agent_loaded"];
+			this.chatContainer.addChild(new Text(`JLC agent: ${agentLoaded ? theme.fg("success", "loaded") : theme.fg("error", "unavailable")}`, 1, 0));
+		}
+		this.chatContainer.addChild(new Spacer(1));
+		this.ui.requestRender();
+	}
+
+	private async handleRegisterCommand(registerPath?: string): Promise<void> {
+		const sidecarUrl = process.env.JARVIS_SIDECAR_URL ?? "http://127.0.0.1:8765";
+		const pairId = process.env.JARVIS_PAIR_ID?.trim();
+		const targetPath = registerPath?.trim() || this.sessionManager.getCwd();
+		if (!targetPath) {
+			this.showWarning("No path specified and no working directory available.");
+			return;
+		}
+		try {
+			const headers: Record<string, string> = { "content-type": "application/json" };
+			if (pairId) headers["X-Jarvis-Pair"] = pairId;
+			const response = await fetch(`${sidecarUrl}/register_project`, {
+				method: "POST",
+				headers,
+				body: JSON.stringify({ path: targetPath }),
+			});
+			const data = (await response.json()) as { ok?: boolean; name?: string; error?: string; warnings?: string[] };
+			if (data.ok) {
+				this.showStatus(`Registered project: ${data.name ?? targetPath}`);
+			} else {
+				this.showWarning(data.error ?? `Failed to register "${targetPath}"`);
+			}
+		} catch (err) {
+			this.showError(`Failed to register project: ${err instanceof Error ? err.message : String(err)}`);
+		}
 	}
 
 	private async handleModelCommand(searchTerm?: string): Promise<void> {
