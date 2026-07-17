@@ -1711,6 +1711,11 @@ try {
         Write-Warning "JARVIS sidecar did not become healthy; Pi will continue with degraded memory."
     }
 
+    # Save invoker's original working directory before Push-Location changes it.
+    # The agent needs this to resolve the current project from the user's actual CWD
+    # instead of always seeing the pi engine root.
+    $env:JARVIS_ORIGINAL_CWD = (Get-Location -PSProvider FileSystem).ProviderPath
+
     Push-Location $PiRoot
     $PushedPiLocation = $true
     $forwardArgs = @()

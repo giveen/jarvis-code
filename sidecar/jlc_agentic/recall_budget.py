@@ -6,7 +6,7 @@ from typing import Any
 
 from jlc_agentic.agentic.preflight import count_tokens, trim_to_tokens
 
-DEFAULT_EVIDENCE_TOKENS = 40_000
+DEFAULT_EVIDENCE_TOKENS = 8_000
 DEFAULT_FRAGMENT_TOKENS = 4_000
 
 

@@ -22,7 +22,7 @@ SIDECAR_ROOT = ROOT / "sidecar"
 SIDECAR_VENV = SIDECAR_ROOT / ".venv"
 PI_AGENT_DIR = ROOT / "pi-agent"
 DATA_DIR = ROOT / "data"
-EMBEDDER_MODEL = "BAAI/bge-m3"
+EMBEDDER_MODEL = "tencent/R3-embedding-0.6b"
 WINDOWS_VC_REDIST_DLLS = ("vcruntime140_1.dll", "msvcp140.dll")
 WINDOWS_VC_REDIST_MESSAGE = (
     "Microsoft Visual C++ Redistributable (x64) is required for the memory/embedding layer: "

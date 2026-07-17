@@ -123,13 +123,18 @@ def _model_context_window(model: str | None) -> int:
     if override > 0:
         return override
     name = str(model or "").casefold()
+    if "qwen" in name:
+        return 32_768
     if "gpt-5.5" in name or "gpt-5.4" in name or "openai-codex" in name:
         return 267_000
     if "gpt-5" in name:
         return 400_000
     if "claude" in name:
         return 200_000
-    return 267_000
+    # Safe default for unknown/local models — conservatively small so preflight
+    # doesn't let oversized payloads through. Cloud models not caught above
+    # should set JARVIS_PROVIDER_CONTEXT_WINDOW explicitly.
+    return 32_768
 
 
 def _budget_tokens(model: str | None) -> int:

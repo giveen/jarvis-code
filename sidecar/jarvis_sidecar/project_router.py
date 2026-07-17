@@ -141,6 +141,39 @@ class ProjectRouter:
                 tied = True
         return None if tied else best
 
+    def _maybe_auto_register_cwd(self, cwd_hint: str | None) -> WorkspaceProject | None:
+        """Auto-register *cwd_hint* as a project when it is safe to do so.
+
+        Called from :meth:`select` when the CWD path is not yet in the registry.
+        Returns the new (or existing, if a race already registered it) project,
+        or None when the path fails the safety checks.
+        """
+        if not cwd_hint or self.registry.is_corrupt:
+            return None
+
+        ok, reason = _is_safe_auto_register_path(cwd_hint)
+        if not ok:
+            return None
+
+        # Normalize for consistent look-up (race with another process).
+        resolved = _normalize_path(cwd_hint)
+        if not resolved:
+            return None
+
+        existing = self.registry.get_by_path(resolved)
+        if existing is not None:
+            return existing
+
+        from pathlib import Path
+        name = Path(resolved).name
+        if not name:
+            return None
+
+        try:
+            return self.create_project(name, code_path=resolved)
+        except (InvalidProjectNameError, RegistryCorruptError):
+            return None
+
     def select(
         self,
         *,
@@ -216,6 +249,21 @@ class ProjectRouter:
                 trace.update({"source": "extension_cwd_fallback", "path": project.path, "project_id": project.project_id})
                 self._last_resolved_from = "extension_cwd_fallback"
                 return project, warnings, trace
+            # Auto-register the CWD directory as a project when it's a valid
+            # non-system directory and the user hasn't pinned an active project.
+            if not active_project_path and cwd_hint:
+                auto_project = self._maybe_auto_register_cwd(cwd_hint)
+                if auto_project is not None:
+                    self._remember_active(auto_project)
+                    msg = f"auto-registered project from current directory: {auto_project.name}"
+                    warnings.append(msg)
+                    trace.update({
+                        "source": "auto_register_cwd",
+                        "path": auto_project.path,
+                        "project_id": auto_project.project_id,
+                    })
+                    self._last_resolved_from = "auto_register_cwd"
+                    return auto_project, warnings, trace
             warnings.append(f"active project path not registered: {fallback_path}")
             trace.update({"source": "fallback", "active_project_path": fallback_path})
             self._last_resolved_from = "fallback"
@@ -361,3 +409,58 @@ def _is_path_within(path: str, root: str) -> bool:
     except ValueError:
         return False
 
+
+# POSIX system root prefixes we refuse to auto-register. Matches the deny list
+# in register_project.py (jlc_agentic/agentic/tools/register_project.py) so
+# both code paths agree on what a "project" is.
+_AUTO_REGISTER_DENY_PREFIXES: tuple[str, ...] = (
+    "/tmp", "/var", "/usr", "/etc", "/proc", "/sys", "/dev", "/bin", "/sbin",
+    "/Library", "/System", "/Applications", "/run",
+    "/root", "/opt", "/boot", "/srv",
+)
+_SENSITIVE_SUFFIXES: tuple[str, ...] = (
+    ".ssh", ".gnupg", ".config", ".cache", ".local",
+    "AppData", "Application Data",
+)
+
+
+def _is_safe_auto_register_path(candidate_path: str) -> tuple[bool, str]:
+    """Check whether *candidate_path* is safe to auto-register as a project.
+
+    Returns ``(ok, reason)``.  When ``ok`` is False, *reason* explains why
+    (logged / surfaced as a warning so the user understands the skip).
+    """
+    if not candidate_path:
+        return False, "empty path"
+
+    normalized = _normalize_path(candidate_path)
+    if not normalized:
+        return False, "path could not be resolved"
+
+    if not os.path.isdir(normalized):
+        return False, "not a directory or does not exist"
+
+    # Block system roots — same prefixes as register_project.py
+    norm_upper = normalized.upper()
+    for prefix in _AUTO_REGISTER_DENY_PREFIXES:
+        pref_upper = prefix.upper()
+        if norm_upper == pref_upper or norm_upper.startswith(pref_upper + "/"):
+            return False, f"inside system directory: {prefix}"
+
+    # Block sensitive user-folder suffixes (config / secret stores)
+    from pathlib import Path
+    tail = Path(normalized).name
+    if tail in _SENSITIVE_SUFFIXES:
+        return False, f"sensitive folder name: {tail}"
+
+    # Block protected roots (the JARVIS install / data directories)
+    from .config import is_protected_path
+    if is_protected_path(normalized):
+        return False, "inside protected JARVIS root"
+
+    # Block the user's home directory itself — too broad
+    import pathlib
+    if normalized == str(pathlib.Path.home()):
+        return False, "is the home directory"
+
+    return True, ""

@@ -476,8 +476,11 @@ class JLCRetriever:
 
     # ── Embed ──
 
-    async def _embed(self, texts: list[str]) -> list[list[float]]:
-        """Get embeddings from local fastembed model."""
+    async def _embed(self, texts: list[str], query: bool = False) -> list[list[float]]:
+        """Get embeddings from local embedder.
+
+        When query=True the embedder uses query-side prompts (e.g. ``prompt_name="query"``).
+        """
         # Lazy-load embedder if not injected yet
         if self._embedder is None:
             from .embedder import LocalEmbedder
@@ -485,7 +488,7 @@ class JLCRetriever:
             self._embedder = LocalEmbedder()
         t0 = time.monotonic()
         try:
-            embeddings = await asyncio.to_thread(self._embedder.embed, texts)
+            embeddings = await asyncio.to_thread(self._embedder.embed, texts, query=query)
             if not embeddings:
                 return []
             return embeddings
@@ -1006,7 +1009,7 @@ class JLCRetriever:
             print(f"[jlc:ret] search_within: {conv_id} index.jsonl is empty", file=sys.stderr)
             return {"confidence": "LOW", "fragments": []}
 
-        query_emb = await self._embed([query])
+        query_emb = await self._embed([query], query=True)
         if not query_emb:
             print(f"[jlc:ret] search_within: query embedding failed for {conv_id}", file=sys.stderr)
             return {"confidence": "LOW", "fragments": []}
@@ -1058,15 +1061,14 @@ class JLCRetriever:
         correction_bonus: float = 0.10,
         session_id: str | None = None,
     ) -> RetrieverSearchResult:
-        """JRE-style hybrid: BM25 narrow → bge-m3 cosine rerank → meta bonuses.
+        """JRE-style hybrid: BM25 narrow → embedding cosine rerank → meta bonuses.
 
-        Pipeline (matches `C:/codex/JRE.md` spec):
-          1. BM25 over all stored turns, take top `bm25_pool` (default 50).
-          2. Cosine-rerank that pool against bge-m3 query embedding.
+        Pipeline:
+          1. BM25 over all stored turns, take top ``bm25_pool`` (default 50).
+          2. Cosine-rerank that pool against embedding query vector.
           3. Apply recency bonus (later turn = small boost) + correction bonus
              (later turn touching the same identifier as an earlier one wins).
           4. Return original turn text — no LLM summarization.
-
         Falls back gracefully:
           - rank-bm25 missing → degrades to keyword scoring.
           - embedder degraded → returns BM25 top_k unchanged.
@@ -1122,7 +1124,7 @@ class JLCRetriever:
                     print(f"[jlc:ret] index.jsonl load failed for {conv_id}: {exc}", file=sys.stderr)
 
                 # Embed query (always 1 call)
-                q_emb = await self._embed([query])
+                q_emb = await self._embed([query], query=True)
                 if not q_emb:
                     raise RuntimeError("query embedding returned empty")
                 q_vec = q_emb[0]
@@ -1412,7 +1414,7 @@ class JLCRetriever:
             print(f"[jlc:ret] search: {conv_id} index.jsonl is empty", file=sys.stderr)
             return {"confidence": "LOW", "fragments": []}
 
-        query_emb = await self._embed([query])
+        query_emb = await self._embed([query], query=True)
         if not query_emb:
             print(f"[jlc:ret] search: query embedding failed for {conv_id}", file=sys.stderr)
             return {"confidence": "LOW", "fragments": []}

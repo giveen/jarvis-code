@@ -200,13 +200,22 @@ export async function loadAttachment(
 	throw new Error(`Unsupported file type: ${mimeType}`);
 }
 
+function getTextItemText(item: unknown): string {
+	if (typeof item === "object" && item !== null && "str" in item) {
+		const str: unknown = item.str;
+		return typeof str === "string" ? str : "";
+	}
+	return "";
+}
+
 async function processPdf(
 	arrayBuffer: ArrayBuffer,
 	fileName: string,
 ): Promise<{ extractedText: string; preview?: string }> {
+	const loadingTask = pdfjsLib.getDocument({ data: arrayBuffer });
 	let pdf: PDFDocumentProxy | null = null;
 	try {
-		pdf = await pdfjsLib.getDocument({ data: arrayBuffer }).promise;
+		pdf = await loadingTask.promise;
 
 		// Extract text with page structure
 		let extractedText = `<pdf filename="${fileName}">`;
@@ -214,8 +223,8 @@ async function processPdf(
 			const page = await pdf.getPage(i);
 			const textContent = await page.getTextContent();
 			const pageText = textContent.items
-				.map((item: any) => item.str)
-				.filter((str: string) => str.trim())
+				.map(getTextItemText)
+				.filter((str) => str.trim().length > 0)
 				.join(" ");
 			extractedText += `\n<page number="${i}">\n${pageText}\n</page>`;
 		}
@@ -229,10 +238,8 @@ async function processPdf(
 		console.error("Error processing PDF:", error);
 		throw new Error(`Failed to process PDF: ${String(error)}`);
 	} finally {
-		// Clean up PDF resources
-		if (pdf) {
-			pdf.destroy();
-		}
+		// Clean up PDF resources via loading task (v6 API)
+		loadingTask.destroy();
 	}
 }
 

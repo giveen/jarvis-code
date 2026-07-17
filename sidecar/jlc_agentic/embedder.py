@@ -1,7 +1,7 @@
-"""Local in-process embedder backed by sentence-transformers + bge-m3.
+"""Local in-process embedder backed by sentence-transformers + R3-embedding-0.6b.
 
 In-process embedding for jarvis-code: no daemon, no HTTP, no API key.
-Model loads lazily on first call; first run downloads ~2.27GB to HF cache.
+Model loads lazily on first call; first run downloads to HF cache.
 """
 from __future__ import annotations
 
@@ -52,11 +52,11 @@ def resolve_embedder_device(requested: str) -> str:
 
 
 class LocalEmbedder:
-    """Lazy-loading sentence-transformers wrapper for BAAI/bge-m3 (dim=1024)."""
+    """Lazy-loading sentence-transformers wrapper for tencent/R3-embedding-0.6b (dim=1024)."""
 
     def __init__(
         self,
-        model_name: str = "BAAI/bge-m3",
+        model_name: str = "tencent/R3-embedding-0.6b",
         cache_dir: str | None = None,
         device: str = "auto",
     ) -> None:
@@ -65,8 +65,8 @@ class LocalEmbedder:
         self._device = resolve_embedder_device(device)
         self._model: Any | None = None
         self._load_failed = False
-        # Dim is detected from the model after lazy load; 1024 is the bge-m3
-        # default and acts as the pre-load advertised value only.
+        # Dim is detected from the model after lazy load; 1024 is the
+        # R3-embedding-0.6b default and acts as the pre-load advertised value only.
         self._dim = 1024
 
     @property
@@ -125,7 +125,7 @@ class LocalEmbedder:
                 print(f"[jlc:embed] transient load error (will retry): {exc}", file=sys.stderr)
             return None
 
-    def embed(self, texts: list[str]) -> list[list[float]]:
+    def embed(self, texts: list[str], query: bool = False) -> list[list[float]]:
         if not texts:
             return []
 
@@ -134,12 +134,13 @@ class LocalEmbedder:
             return []
 
         try:
-            vectors = model.encode(
-                texts,
-                normalize_embeddings=True,
-                convert_to_numpy=True,
-                show_progress_bar=False,
-            )
+            encode_kwargs: dict[str, Any] = {
+                "normalize_embeddings": True,
+                "show_progress_bar": False,
+            }
+            if query:
+                encode_kwargs["prompt_name"] = "query"
+            vectors = model.encode(texts, **encode_kwargs)
             out: list[list[float]] = [vec.tolist() for vec in vectors]
             if out and len(out[0]) != self._dim:
                 print(
@@ -149,9 +150,9 @@ class LocalEmbedder:
                 return []
             return out
         except Exception as exc:
-            print(f"[jlc:embed] embed failed: {exc}", file=sys.stderr)
+            print(f"[jlc:embed] encode failed: {exc}", file=sys.stderr)
             return []
 
-    def embed_one(self, text: str) -> list[float]:
-        vectors = self.embed([text])
+    def embed_one(self, text: str, query: bool = False) -> list[float]:
+        vectors = self.embed([text], query=query)
         return vectors[0] if vectors else []

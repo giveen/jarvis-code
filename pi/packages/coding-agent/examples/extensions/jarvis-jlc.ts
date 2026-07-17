@@ -5241,12 +5241,10 @@ export default function jarvisJlc(pi: ExtensionAPI) {
 		// Resolve cwd defensively: ctx.cwd throws if the extension runtime is
 		// stale (session replacement or reload between turns). Fall back to
 		// process.cwd() so the sidecar call still succeeds.
-		let cwdHint: string;
-		try {
-			cwdHint = ctx.cwd;
-		} catch {
-			cwdHint = process.cwd();
-		}
+		// Prefer JARVIS_ORIGINAL_CWD when set — the jarvis launcher sets this to
+		// preserve the user's actual working directory, since the launcher
+		// overrides the subprocess cwd to the pi root.
+		const cwdHint = jarvisCwd(ctx);
 
 		try {
 			await maybeHandleSetupFlow(userText, ctx);
@@ -8244,11 +8242,10 @@ export default function jarvisJlc(pi: ExtensionAPI) {
 				// hint cleared so the router falls back to its persisted active.
 				try {
 					const response = await postSidecar<SidecarContextResponse>("/context", {
-						cwd_hint: ctx.cwd,
-						mode: modeForRoute(currentRoute),
+						cwd_hint: jarvisCwd(ctx),
 						user_message: "",
 						active_project_path: isProjectRoute(currentRoute) ? currentActiveProjectHint() : undefined,
-						hints: { cwd: ctx.cwd },
+						hints: { cwd: jarvisCwd(ctx) },
 					});
 					projectPath = response?.active_project_path ?? response?.code_path ?? undefined;
 					if (response) {
@@ -9389,7 +9386,7 @@ function registerSidecarChatProxyProvider(
 					},
 					input: ["text"],
 					cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-					contextWindow: 200000,
+					contextWindow: 32_768,
 					maxTokens: 32000,
 					compat: {
 						supportsStore: false,
@@ -9648,13 +9645,13 @@ async function resolveActiveProjectPath(ctx: ExtensionContext, pi?: ExtensionAPI
 	if (!isProjectRoute(currentRoute)) return undefined;
 	if (activeProjectPath) return activeProjectPath;
 	const response = await postSidecar<SidecarContextResponse>("/context", {
-		cwd_hint: ctx.cwd,
+		cwd_hint: jarvisCwd(ctx),
 		mode: modeForRoute(currentRoute),
 		user_message: lastUserMessage,
 		active_project_path: isProjectRoute(currentRoute) ? currentActiveProjectHint() : undefined,
 		bench_conv_id: pi ? benchConvId(pi) : undefined,
 		hints: {
-			cwd: ctx.cwd,
+			cwd: jarvisCwd(ctx),
 		},
 	});
 	applyContextProjectState(response, modeForRoute(currentRoute));
@@ -9664,6 +9661,24 @@ async function resolveActiveProjectPath(ctx: ExtensionContext, pi?: ExtensionAPI
 
 function currentActiveProjectHint(): string | undefined {
 	return activeProjectPath;
+}
+
+
+/** Resolve the effective current working directory for the sidecar cwd_hint.
+ *
+ * Prefer JARVIS_ORIGINAL_CWD when set — the jarvis launcher (jarvis.ps1 /
+ * jarvis-launcher.py) sets this to preserve the user's actual working directory
+ * before overriding the subprocess cwd to the pi engine root.
+ * Falls back to ctx.cwd (session cwd), then process.cwd().
+ */
+function jarvisCwd(ctx: ExtensionContext): string {
+	const envCwd = process.env.JARVIS_ORIGINAL_CWD;
+	if (envCwd) return envCwd;
+	try {
+		return ctx.cwd;
+	} catch {
+		return process.cwd();
+	}
 }
 
 function applyContextProjectState(response: SidecarContextResponse | undefined, _mode: SidecarContextMode): void {

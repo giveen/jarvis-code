@@ -90,7 +90,7 @@ def _start_sidecar(ws_port: int, repo_root: Path) -> None:
     # JarvisAgentic singleton (jlc_agentic.get_slim) is shared with Aider's
     # coder, the bench TCP listener, and the WS endpoint. Previously this
     # was a subprocess.Popen, which gave each process its own LocalEmbedder
-    # and double-loaded bge-m3 weights every session.
+    # and double-loaded embedding model weights every session.
     from .app import start_sidecar_once
 
     start_sidecar_once(host=HOST, port=ws_port)

@@ -53,6 +53,9 @@ AUTH_COMMANDS = {
     "claude-login",
     "anthropic-login",
     "claude-auth-status",
+    "nous-login",
+    "nous-auth-status",
+    "nous-logout",
     "claude-logout",
     "api-key",
     "model-setting",
@@ -91,7 +94,8 @@ BUILT_IN_MODEL_PROVIDERS = {
     "xiaomi",
     "xiaomi-token-plan-cn",
     "xiaomi-token-plan-ams",
-    "xiaomi-token-plan-sgp",
+	"xiaomi-token-plan-sgp",
+	"llamacpp",
 }
 SIDECAR_ROUTED_MODEL_PROVIDERS = {"anthropic-agent-sdk"}
 
@@ -868,9 +872,10 @@ def run_agent(args: list[str], config_path: Path) -> int:
             )
         )
         return 0
-
     cli = PI_ROOT / "packages" / "coding-agent" / "src" / "cli.ts"
-    return subprocess.call([str(tsx), str(cli), *forward], cwd=str(PI_ROOT), env=os.environ.copy())
+    env = os.environ.copy()
+    env["JARVIS_ORIGINAL_CWD"] = os.getcwd()
+    return subprocess.call([str(tsx), str(cli), *forward], cwd=str(PI_ROOT), env=env)
 
 
 def terminate_started_sidecar(proc: subprocess.Popen[str] | None) -> None:

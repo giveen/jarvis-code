@@ -642,8 +642,8 @@ class JarvisAgentic:
         self.turn_logger = JLCTurnLogger(storage_root=self._jhb_root)
         self.retriever = JLCRetriever(storage_root=self._retriever_root, embedder=None)
         self.jre = JREEngine(storage_root=self._jhb_root, embedder=None)
-        # bge-m3 cold start is ~30s. Run synchronously so the "Loading weights:
-        # 391/391" progress bar surfaces before the chat UI accepts input —
+        # R3-embedding cold start is ~5s. Run synchronously so the model
+        # loads before the chat UI accepts input —
         # users (and recall_turn) need the embedder warm before the first turn.
         self._warmup_embedder()
         self._schedule_jhb_rebuild_from_raw()
@@ -836,7 +836,7 @@ class JarvisAgentic:
 
     def _warmup_embedder(self) -> None:
         """Synchronous warmup so the first recall probe doesn't trip the timeout
-        and the bge-m3 progress bar surfaces before the chat UI is ready.
+        and the embedding model progress bar surfaces before the chat UI is ready.
         Idempotent — safe if hybrid_search has already loaded the model.
         Thread-safe: uses lock to prevent race condition where two threads
         both see _embedder_warmed=False and both load weights.
@@ -855,9 +855,9 @@ class JarvisAgentic:
                 print("[jlc:embed] warmup skipped (JARVIS_SKIP_EMBEDDER_WARMUP=1)", file=sys.stderr, flush=True)
                 return
             try:
-                print("[jlc:embed] Loading bge-m3 weights...", file=sys.stderr, flush=True)
-                embedder = self._get_embedder()  # build wrapper (cheap; weights load on first embed)
-                embedder.embed(["warmup"])  # force SentenceTransformer load before chat starts; without this, the first turn's retriever and the encoder's JRE race on _ensure_model and BOTH load weights
+                print("[jlc:embed] Loading embedding model weights...", file=sys.stderr, flush=True)
+                embedder = self._get_embedder()
+                embedder.embed(["warmup"])
                 self._embedder_warmed = True
                 print(
                     f"[jlc:embed] Embedder ready (dim={embedder.dim}).",
@@ -871,7 +871,6 @@ class JarvisAgentic:
                 # (e.g., after partial SWE-bench install). Catch BaseException so the sidecar
                 # survives in light-memory mode instead of dying silently at startup.
                 print(f"[jlc:warmup] embedder warmup crashed (degraded mode): {type(exc).__name__}: {exc}", file=sys.stderr, flush=True)
-
     def _schedule_jhb_rebuild_from_raw(self, session_id: str | None = None) -> None:
         if not self._pair8:
             return
@@ -1518,7 +1517,7 @@ class JarvisAgentic:
         timeout: maximum seconds to wait. On expiry, log a stderr warning
         and return WITHOUT releasing — the holder still owns the lock and
         will release on its own. Intended for cold-start races on turn 1
-        of a 100-turn run, where the encoder LLM warm-up + bge-m3 load can
+        of a 100-turn run, where the encoder LLM warm-up + embedding model load can
         take longer than a chat turn would otherwise tolerate. Default 10
         minutes is generous enough for any normal encode + safe enough that
         a truly stuck encoder no longer wedges chat indefinitely.

@@ -62,7 +62,7 @@ class GraphConfig:
 
 @dataclass
 class EmbedderConfig:
-    model_name: str = "BAAI/bge-m3"
+    model_name: str = "tencent/R3-embedding-0.6b"
     cache_dir: str = "~/.cache/huggingface"
     # "auto" = cuda when torch actually sees one, else cpu. Explicit "cuda"
     # falls back to cpu with a loud warning (see resolve_embedder_device).

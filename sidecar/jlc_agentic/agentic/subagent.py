@@ -442,7 +442,7 @@ def make_handler(
     JHB store the host writes to.
 
     retriever (optional): forwarded so recall_turns inside the subagent
-    reuses the host's warm singleton instead of cold-loading bge-m3.
+    reuses the host's warm singleton instead of cold-loading the embedding model.
 
     reasoning_effort (optional): parked on turn_context while the subagent
     loop runs so Agent SDK providers do not fall back to their high default.

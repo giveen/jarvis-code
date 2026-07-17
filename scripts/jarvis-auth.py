@@ -611,6 +611,122 @@ def cmd_gpt_logout(_args: argparse.Namespace) -> int:
     return code
 
 
+NOUS_ENV_NAME = "NOUS_INFERENCE_KEY"
+NOUS_PROVIDER = "nous-research"
+NOUS_DEFAULT_CHAT_MODEL = "tencent/hy3:free"
+NOUS_DEFAULT_ENCODER_MODEL = "stepfun/step-3.7-flash:free"
+NOUS_HERMES_DIR = "/mnt/storage/Projects/hermes-agent"
+
+
+def _run_nous_oauth_flow() -> dict[str, str] | None:
+    """Run Nous Research OAuth device-code login via hermes-agent CLI.
+
+    Opens a browser, asks the user to log in, then returns credentials.
+    """
+    hermes_dir = Path(NOUS_HERMES_DIR)
+    if not hermes_dir.exists():
+        print(f"Error: hermes-agent not found at {hermes_dir}", file=sys.stderr)
+        print("Install from https://github.com/NousResearch/hermes-agent", file=sys.stderr)
+        return None
+
+    hermes_bin = shutil.which("hermes")
+    if hermes_bin:
+        cmd = [hermes_bin, "auth", "add", "nous"]
+    else:
+        cmd = [sys.executable, "-m", "hermes_cli", "auth", "add", "nous"]
+
+    print()
+    print("╔══════════════════════════════════════════════════╗")
+    print("║     Nous Research Login (via hermes-agent)      ║")
+    print("╚══════════════════════════════════════════════════╝")
+    print()
+
+    try:
+        code = subprocess.call(cmd, cwd=str(hermes_dir))
+        if code != 0:
+            return None
+    except KeyboardInterrupt:
+        print("\nLogin cancelled.")
+        return None
+
+    # Read credentials from hermes-agent auth store
+    auth_path = Path.home() / ".hermes" / "auth.json"
+    if not auth_path.exists():
+        print("Error: hermes-agent auth store not found.", file=sys.stderr)
+        return None
+    try:
+        with open(auth_path) as f:
+            auth = json.load(f)
+        nous = auth.get("providers", {}).get("nous", {})
+        if not nous or not nous.get("access_token"):
+            print("Error: Nous credentials not found in hermes-agent store.", file=sys.stderr)
+            return None
+        return dict(nous)
+    except (json.JSONDecodeError, OSError) as e:
+        print(f"Error reading hermes-agent auth store: {e}", file=sys.stderr)
+        return None
+
+
+def _apply_nous_defaults() -> None:
+    """Set Nous Research as default chat/encoder provider."""
+    from jarvis_sidecar.llm_setting import apply_picks
+
+    apply_picks(
+        (NOUS_PROVIDER, NOUS_DEFAULT_CHAT_MODEL),
+        (NOUS_PROVIDER, NOUS_DEFAULT_ENCODER_MODEL),
+        catalog=_load_catalog(),
+    )
+
+
+def cmd_nous_login(_args: argparse.Namespace) -> int:
+    """Login to Nous Research via OAuth device-code flow (opens browser)."""
+    from jarvis_sidecar.config import save_credential_env
+
+    creds = _run_nous_oauth_flow()
+    if not creds:
+        return 1
+
+    access_token = creds["access_token"]
+    token_preview = f"{access_token[:20]}...{access_token[-10:]}"
+
+    path = save_credential_env(NOUS_ENV_NAME, access_token)
+    print(f"\nNous Research credentials saved to {path}")
+    print(f"Access token: {token_preview}")
+
+    _apply_nous_defaults()
+    print(
+        f"JARVIS default chat set to {NOUS_PROVIDER}/{NOUS_DEFAULT_CHAT_MODEL},\n"
+        f"encoder set to {NOUS_PROVIDER}/{NOUS_DEFAULT_ENCODER_MODEL}."
+    )
+    print()
+    print("Next:")
+    print("    jarvis model-setting   (to pick different models)")
+    return 0
+
+
+def cmd_nous_status(_args: argparse.Namespace) -> int:
+    """Check Nous Research auth status."""
+    _load_credentials_into_env()
+    token = os.environ.get(NOUS_ENV_NAME, "")
+    if not token:
+        print("Nous Research: not logged in.")
+        print("Run: jarvis nous-login")
+        return 1
+    print("Nous Research: logged in.")
+    print(f"  Token: {token[:20]}...{token[-10:]}")
+    return 0
+
+
+def cmd_nous_logout(_args: argparse.Namespace) -> int:
+    """Remove Nous Research credentials from Jarvis."""
+    from jarvis_sidecar.config import remove_credential_env
+
+    path = remove_credential_env(NOUS_ENV_NAME)
+    print(f"Nous Research credentials removed from Jarvis ({path}).")
+    print("(hermes-agent credentials in ~/.hermes/auth.json are kept.)")
+    return 0
+
+
 def bundled_claude_cli() -> str | None:
     """Return the Claude Code CLI bundled by claude-agent-sdk, when present."""
     exe = "claude.exe" if os.name == "nt" else "claude"
@@ -1085,6 +1201,16 @@ def build_parser() -> argparse.ArgumentParser:
 
     claude_logout = sub.add_parser("claude-logout")
     claude_logout.set_defaults(func=cmd_claude_logout)
+
+    nous_login = sub.add_parser("nous-login")
+    nous_login.add_argument("--device-code", action="store_true", help="show device code instead of opening browser")
+    nous_login.set_defaults(func=cmd_nous_login)
+
+    nous_status = sub.add_parser("nous-auth-status")
+    nous_status.set_defaults(func=cmd_nous_status)
+
+    nous_logout = sub.add_parser("nous-logout")
+    nous_logout.set_defaults(func=cmd_nous_logout)
 
     api_key = sub.add_parser("api-key")
     api_key.add_argument("provider", nargs="?", help="provider id or env name, e.g. openai or OPENAI_API_KEY")

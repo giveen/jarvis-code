@@ -177,11 +177,24 @@ class OpenAICompatibleAdapter:
             raise RuntimeError("API key not provided (explicit, api_key_env, or OPENAI_API_KEY)")
 
         self.api_key = key
+        self.api_key_env = api_key_env
         self.base_url = base_url.rstrip("/")
         self.model = model
         self.timeout_sec = timeout_sec
         self.silence_threshold_sec = silence_threshold_sec
         self.on_silence = on_silence
+
+    @property
+    def _effective_api_key(self) -> str:
+        """Re-read the API key from the env on each call so token refresh
+        (e.g. Nous Research OAuth auto-refresh) takes effect without
+        restarting the sidecar.
+        """
+        if self.api_key_env:
+            env_val = os.environ.get(self.api_key_env)
+            if env_val:
+                return env_val
+        return self.api_key
 
     def stream_chat_completions(
         self,
@@ -216,23 +229,13 @@ class OpenAICompatibleAdapter:
             data=json.dumps(body).encode("utf-8"),
             headers=with_jarvis_user_agent(
                 {
-                    "Authorization": f"Bearer {self.api_key}",
+                    "Authorization": f"Bearer {self._effective_api_key}",
                     "Content-Type": "application/json",
                     "Accept": "text/event-stream",
                 }
             ),
             method="POST",
         )
-
-        # 2026-05-04: 1000/10000-turn bench 안정성 — transient 에러는 30초마다
-        # retry (max 30분 cap), 4xx client 에러는 즉시 raise (request 자체가
-        # invalid라 retry해도 풀리지 않음 → loop layer가 turn-level error로
-        # fallback, L4가 client에서 다음 prompt로 진행). Retry 대상: 408 timeout,
-        # 429 rate-limit (Retry-After 존중), 5xx 서버 에러, URLError (network/
-        # timeout/connection reset/Cloudflare proxied 520-525). MAX_RETRIES cap은
-        # 인프라 다운 시 무한 hang 방지 — cap 도달 시 RuntimeError raise하면 L4가
-        # 그 turn만 error 마킹하고 진행.
-        from urllib.error import HTTPError as _HTTPError
         MAX_RETRIES = 60  # 30s * 60 = 30분 cap
         _attempt = 0
         resp = None
