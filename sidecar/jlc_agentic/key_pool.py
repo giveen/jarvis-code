@@ -107,3 +107,26 @@ class KeyPool:
             (provider, key),
             {"disabled": False, "cooldown_until": 0.0},
         )
+
+    def replace_key(self, provider: str, old_key: str, new_key: str) -> bool:
+        """Replace ``old_key`` with ``new_key`` for a provider, re-enabling it.
+
+        Returns True if the key was replaced, False if old_key was not found.
+        Caller should check the return and only retry when True.
+        """
+        with self._lock:
+            if (provider, old_key) not in self._state:
+                return False
+            keys = self._providers.get(provider)
+            if keys is None:
+                return False
+            try:
+                idx = keys.index(old_key)
+            except ValueError:
+                return False
+            keys[idx] = new_key
+            state = self._state.pop((provider, old_key))
+            state["disabled"] = False
+            state["cooldown_until"] = 0.0
+            self._state[(provider, new_key)] = state
+            return True

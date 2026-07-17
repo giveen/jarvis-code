@@ -881,12 +881,41 @@ def _agent_jhb_rebuild_in_progress(agent: Any, session_id: str) -> bool:
         return False
 
 
+def _register_nous_key_refresh(router: Any) -> None:
+    """If hermes-agent is available, register a 401 key-refresh hook for nous-research.
+
+    Called on 401 from the ProviderRouter so the stale OAuth-sourced token is
+    refreshed transparently instead of dropping the user's turn.
+    """
+    try:
+        import importlib
+
+        hermes_auth = importlib.import_module("hermes_cli.auth")
+        resolve = hermes_auth.resolve_nous_access_token
+    except Exception:
+        return  # hermes-agent not installed or not logged in
+
+    register_hook = getattr(router, "register_key_refresh_hook", None)
+    if not callable(register_hook):
+        return
+    try:
+        register_hook("nous-research", resolve)
+        print("[jarvis-sidecar] Registered 401 key-refresh hook for nous-research")
+    except Exception as exc:
+        print(
+            f"[jarvis-sidecar] Failed to register nous-research key refresh: {exc}",
+            file=sys.stderr,
+        )
+
+
 def _init_provider_router() -> None:
     try:
         from jlc_agentic.bootstrap import init_provider_router
         ensure_sidecar_config()
         set_sidecar_provider_router(None)
         router = init_provider_router(SimpleNamespace(providers_config=str(providers_path())))
+        if router is not None:
+            _register_nous_key_refresh(router)
         set_sidecar_provider_router(router)
         clear_cache()
     except SystemExit:
@@ -895,7 +924,6 @@ def _init_provider_router() -> None:
         set_sidecar_provider_router(None)
         clear_cache()
         print(f"[jarvis-sidecar] provider router init skipped: {exc}", file=sys.stderr)
-
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI):

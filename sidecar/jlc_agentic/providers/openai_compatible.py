@@ -8,7 +8,7 @@ import threading
 import time
 from collections.abc import Iterator
 from typing import Any, Callable
-from urllib.error import URLError
+from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
 from jlc_agentic.user_agent import with_jarvis_user_agent
@@ -257,7 +257,7 @@ class OpenAICompatibleAdapter:
             try:
                 resp = urlopen(req, timeout=self.timeout_sec)
                 break
-            except _HTTPError as exc:
+            except HTTPError as exc:
                 if exc.code == 429:
                     # 429: provider may specify Retry-After header (seconds).
                     retry_after = exc.headers.get("Retry-After") if hasattr(exc, "headers") else None

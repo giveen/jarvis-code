@@ -6,7 +6,7 @@ import os
 import sys
 import time
 import uuid
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -93,16 +93,63 @@ class ResolvedModel:
     oauth_provider: str | None = None
 
 
+
+
 class ProviderRouter:
+    """Routes model aliases through provider API keys with OAuth and key-pool support."""
+
     def __init__(self, config: dict[str, Any], key_pool: KeyPool) -> None:
         self.config = config
         self.key_pool = key_pool
         self._models = self._index_models(config)
         self._oauth_token_managers: dict[Path, TokenManager] = {}
+        # Per-provider callables that return a fresh API key when the current one
+        # gets a 401 (e.g. OAuth-sourced tokens that need periodic refresh).
+        # The callable receives no args and returns a new key string, or None if
+        # no fresh key is available.
+        self._provider_key_refresh_cbs: dict[str, Callable[[], str | None]] = {}
         # session_id is fixed per-router-instance (conversation), not per-call
         # so multi-turn requests share session continuity on the codex backend.
         self._oauth_session_id = str(uuid.uuid4())
         self.last_stream_meta: dict[str, Any] | None = None
+
+    def register_key_refresh_hook(
+        self, provider_name: str, cb: Callable[[], str | None]
+    ) -> None:
+        """Register a callback that returns a fresh API key for *provider_name*.
+
+        Called on 401 responses before the key pool disables the stale key.
+        If the callback returns a non-None string, the old key is replaced and
+        the call is retried once.
+        """
+        self._provider_key_refresh_cbs[provider_name] = cb
+
+    def _try_401_refresh(self, provider_name: str, old_key: str) -> bool:
+        """On 401, try the registered refresh hook and replace the key in the pool.
+
+        Returns True if the key was replaced (caller should retry).
+        """
+        cb = self._provider_key_refresh_cbs.get(provider_name)
+        if cb is None:
+            return False
+        try:
+            new_key = cb()
+        except Exception as exc:
+            log.warning(
+                "Key refresh hook failed for provider %s: %s",
+                provider_name,
+                exc,
+            )
+            return False
+        if not new_key or not isinstance(new_key, str) or new_key == old_key:
+            return False
+        replaced = self.key_pool.replace_key(provider_name, old_key, new_key)
+        if replaced:
+            log.info(
+                "Replaced stale API key for provider %s (refreshed on 401)",
+                provider_name,
+            )
+        return replaced
 
     def resolve(self, alias: str) -> ResolvedModel:
         resolved_alias = self._resolve_alias(alias)
@@ -141,97 +188,122 @@ class ProviderRouter:
                 skipped += 1
                 log.warning("Skipping alias=%s because no API key is currently available", candidate)
                 continue
-            started = time.perf_counter()
-            try:
-                if resolved.is_oauth and resolved.oauth_provider == "chatgpt":
-                    from jlc_agentic.codex_responses_adapter import (
-                        chat_messages_to_responses_input,
-                        chat_tools_to_responses_tools,
-                        responses_to_chat_completion,
-                        split_instructions_and_input,
-                    )
-                    bare_model = resolved.litellm_id.split("/", 1)[-1]
-                    instructions, non_system = split_instructions_and_input(messages)
-                    response_tools = chat_tools_to_responses_tools(kwargs.get("tools"))
-                    reasoning_effort = _codex_reasoning_effort(kwargs)
-                    response_body = {
-                        "input": chat_messages_to_responses_input(non_system),
-                        "instructions": instructions,
-                        "model": bare_model,
-                        "reasoning": {"effort": reasoning_effort},
-                        "store": False,
-                        "stream": False,
-                    }
-                    if reasoning_effort != "none":
-                        response_body["reasoning"]["summary"] = "detailed"
-                        response_body["include"] = ["reasoning.encrypted_content"]
-                    if response_tools:
-                        response_body["tools"] = response_tools
-                    timeout_sec = _coerce_timeout_sec(
-                        kwargs.get("codex_call_timeout_sec"),
-                        default=_DEFAULT_CODEX_STREAM_TIMEOUT_SEC,
-                    )
-                    response_obj = self._post_codex_responses(
-                        resolved, response_body, timeout_sec=timeout_sec
-                    )
-                    response = responses_to_chat_completion(response_obj, bare_model)
-                    _warn_if_model_fallback(
-                        requested_model=bare_model,
-                        response_model=_response_model(response),
-                        alias=resolved.alias,
-                        provider=resolved.provider,
-                    )
-                else:
-                    if resolved.is_oauth:
-                        # Defense-in-depth: only chatgpt OAuth has a wired
-                        # adapter. Other oauth_provider values must not leak
-                        # the dummy api_key into a real keyed call path.
-                        raise OAuthTokenError(
-                            f"Unsupported oauth_provider={resolved.oauth_provider!r}; "
-                            "no adapter registered."
+            # Inner retry loop: first attempt + one 401-refresh retry
+            for _retry_i in range(2):
+                started = time.perf_counter()
+                try:
+                    if resolved.is_oauth and resolved.oauth_provider == "chatgpt":
+                        from jlc_agentic.codex_responses_adapter import (
+                            chat_messages_to_responses_input,
+                            chat_tools_to_responses_tools,
+                            responses_to_chat_completion,
+                            split_instructions_and_input,
                         )
-                    call_kwargs = {
-                        "model": resolved.litellm_id,
-                        "messages": messages,
-                        "api_key": resolved.api_key,
-                        "api_base": resolved.api_base,
-                        **kwargs,
-                    }
-                    if resolved.extra_headers:
-                        call_kwargs["extra_headers"] = resolved.extra_headers
-                    response = litellm.completion(**call_kwargs)
-                    _warn_if_model_fallback(
-                        requested_model=resolved.litellm_id,
-                        response_model=_response_model(response),
-                        alias=resolved.alias,
-                        provider=resolved.provider,
+                        bare_model = resolved.litellm_id.split("/", 1)[-1]
+                        instructions, non_system = split_instructions_and_input(messages)
+                        response_tools = chat_tools_to_responses_tools(kwargs.get("tools"))
+                        reasoning_effort = _codex_reasoning_effort(kwargs)
+                        response_body = {
+                            "input": chat_messages_to_responses_input(non_system),
+                            "instructions": instructions,
+                            "model": bare_model,
+                            "reasoning": {"effort": reasoning_effort},
+                            "store": False,
+                            "stream": False,
+                        }
+                        if reasoning_effort != "none":
+                            response_body["reasoning"]["summary"] = "detailed"
+                            response_body["include"] = ["reasoning.encrypted_content"]
+                        if response_tools:
+                            response_body["tools"] = response_tools
+                        timeout_sec = _coerce_timeout_sec(
+                            kwargs.get("codex_call_timeout_sec"),
+                            default=_DEFAULT_CODEX_STREAM_TIMEOUT_SEC,
+                        )
+                        response_obj = self._post_codex_responses(
+                            resolved, response_body, timeout_sec=timeout_sec
+                        )
+                        response = responses_to_chat_completion(response_obj, bare_model)
+                        _warn_if_model_fallback(
+                            requested_model=bare_model,
+                            response_model=_response_model(response),
+                            alias=resolved.alias,
+                            provider=resolved.provider,
+                        )
+                    else:
+                        if resolved.is_oauth:
+                            raise OAuthTokenError(
+                                f"Unsupported oauth_provider={resolved.oauth_provider!r}; "
+                                "no adapter registered."
+                            )
+                        call_kwargs = {
+                            "model": resolved.litellm_id,
+                            "messages": messages,
+                            "api_key": resolved.api_key,
+                            "api_base": resolved.api_base,
+                            **kwargs,
+                        }
+                        if resolved.extra_headers:
+                            call_kwargs["extra_headers"] = resolved.extra_headers
+                        response = litellm.completion(**call_kwargs)
+                        _warn_if_model_fallback(
+                            requested_model=resolved.litellm_id,
+                            response_model=_response_model(response),
+                            alias=resolved.alias,
+                            provider=resolved.provider,
+                        )
+                except Exception as exc:  # noqa: BLE001
+                    last_error = exc
+                    status_code = self._status_code(exc)
+                    if status_code is None and isinstance(exc, (TimeoutError, ConnectionError)):
+                        status_code = 503
+                    # On first 401 for a non-OAuth key, try to refresh and retry
+                    refreshed = False
+                    if (
+                        status_code == 401
+                        and _retry_i == 0
+                        and resolved.api_key is not None
+                        and not resolved.is_oauth
+                    ):
+                        refreshed = self._try_401_refresh(resolved.provider, resolved.api_key)
+                    if (
+                        status_code is not None
+                        and resolved.api_key is not None
+                        and not resolved.is_oauth
+                        and not refreshed
+                    ):
+                        self.key_pool.report_failure(
+                            resolved.provider, resolved.api_key, status_code
+                        )
+                    if refreshed:
+                        try:
+                            resolved = self._build_resolved(candidate, block=True)
+                        except (AllKeysDisabledError, OAuthTokenError):
+                            resolved = None
+                        if resolved is not None and resolved.api_key:
+                            log.info(
+                                "Retrying alias=%s after 401 key refresh (provider=%s)",
+                                resolved.alias,
+                                resolved.provider,
+                            )
+                            continue
+                    log.warning(
+                        "LiteLLM call failed for alias=%s provider=%s status=%s",
+                        resolved.alias if resolved else candidate,
+                        resolved.provider if resolved else "?",
+                        status_code,
                     )
-            except Exception as exc:  # noqa: BLE001
-                last_error = exc
-                status_code = self._status_code(exc)
-                if status_code is None and isinstance(exc, (TimeoutError, ConnectionError)):
-                    status_code = 503
-                if (
-                    status_code is not None
-                    and resolved.api_key is not None
-                    and not resolved.is_oauth
-                ):
-                    self.key_pool.report_failure(resolved.provider, resolved.api_key, status_code)
-                log.warning(
-                    "LiteLLM call failed for alias=%s provider=%s status=%s",
-                    resolved.alias,
-                    resolved.provider,
-                    status_code,
-                )
-                continue
+                    break
 
-            latency_ms = int((time.perf_counter() - started) * 1000)
-            if resolved.api_key is not None and not resolved.is_oauth:
-                self.key_pool.report_success(resolved.provider, resolved.api_key)
-            return {
-                "response": response,
-                "llm_meta": self._llm_meta(resolved, response, latency_ms, fallback_attempts),
-            }
+                latency_ms = int((time.perf_counter() - started) * 1000)
+                if resolved.api_key is not None and not resolved.is_oauth:
+                    self.key_pool.report_success(resolved.provider, resolved.api_key)
+                return {
+                    "response": response,
+                    "llm_meta": self._llm_meta(resolved, response, latency_ms, fallback_attempts),
+                }
+            # All inner retries exhausted — skip to next candidate
+            continue
 
         if last_error is not None:
             message = str(last_error)
@@ -285,55 +357,92 @@ class ProviderRouter:
                 )
                 continue
 
-            started = time.perf_counter()
-            yielded_any = False
-            stream_usage: dict[str, Any] | None = None
-            try:
-                for chunk in self._stream_attempt(resolved, messages, **kwargs):
-                    yielded_any = True
-                    if isinstance(chunk, dict) and isinstance(chunk.get("usage"), dict):
-                        stream_usage = chunk["usage"]
-                    yield chunk
-            except Exception as exc:  # noqa: BLE001
-                last_error = exc
-                status_code = self._status_code(exc)
-                if status_code is None and isinstance(
-                    exc, (TimeoutError, ConnectionError)
-                ):
-                    status_code = 503
-                if (
-                    status_code is not None
-                    and resolved.api_key is not None
-                    and not resolved.is_oauth
-                ):
-                    self.key_pool.report_failure(
-                        resolved.provider, resolved.api_key, status_code
+            # Inner retry loop: first attempt + one 401-refresh retry.
+            # Mid-stream failures (after any chunk yielded) are NOT retryable
+            # since partial output has already reached the UI.
+            for _retry_i in range(2):
+                started = time.perf_counter()
+                yielded_any = False
+                stream_usage: dict[str, Any] | None = None
+                try:
+                    for chunk in self._stream_attempt(resolved, messages, **kwargs):
+                        yielded_any = True
+                        if isinstance(chunk, dict) and isinstance(chunk.get("usage"), dict):
+                            stream_usage = chunk["usage"]
+                        yield chunk
+                except Exception as exc:  # noqa: BLE001
+                    last_error = exc
+                    status_code = self._status_code(exc)
+                    if status_code is None and isinstance(
+                        exc, (TimeoutError, ConnectionError)
+                    ):
+                        status_code = 503
+                    # Mid-stream: cannot retry after partial output
+                    if yielded_any:
+                        raise
+                    # Pre-stream 401: try to refresh the key once
+                    refreshed = False
+                    if (
+                        status_code == 401
+                        and _retry_i == 0
+                        and resolved.api_key is not None
+                        and not resolved.is_oauth
+                    ):
+                        refreshed = self._try_401_refresh(
+                            resolved.provider, resolved.api_key
+                        )
+                    if (
+                        status_code is not None
+                        and resolved.api_key is not None
+                        and not resolved.is_oauth
+                        and not refreshed
+                    ):
+                        self.key_pool.report_failure(
+                            resolved.provider, resolved.api_key, status_code
+                        )
+                    if refreshed:
+                        try:
+                            resolved = self._build_resolved(candidate, block=True)
+                        except (AllKeysDisabledError, OAuthTokenError):
+                            resolved = None
+                        if resolved is not None and resolved.api_key:
+                            log.info(
+                                "Retrying stream alias=%s after 401 key refresh (provider=%s)",
+                                resolved.alias,
+                                resolved.provider,
+                            )
+                            continue
+                    log_fn = (
+                        log.info
+                        if kwargs.get("allow_partial_stream")
+                        else log.warning
                     )
-                log_fn = log.info if yielded_any and kwargs.get("allow_partial_stream") else log.warning
-                log_fn(
-                    "Streaming provider call failed for alias=%s provider=%s status=%s yielded_any=%s",
-                    resolved.alias,
-                    resolved.provider,
-                    status_code,
-                    yielded_any,
-                )
-                if yielded_any:
-                    raise
-                continue
+                    log_fn(
+                        "Streaming provider call failed for "
+                        "alias=%s provider=%s status=%s yielded_any=%s",
+                        resolved.alias if resolved else candidate,
+                        resolved.provider if resolved else "?",
+                        status_code,
+                        yielded_any,
+                    )
+                    break
 
-            latency_ms = int((time.perf_counter() - started) * 1000)
-            if resolved.api_key is not None and not resolved.is_oauth:
-                self.key_pool.report_success(
-                    resolved.provider, resolved.api_key
+                latency_ms = int((time.perf_counter() - started) * 1000)
+                if resolved.api_key is not None and not resolved.is_oauth:
+                    self.key_pool.report_success(
+                        resolved.provider, resolved.api_key
+                    )
+                meta_response = (
+                    {"usage": stream_usage} if stream_usage is not None else None
                 )
-            meta_response = {"usage": stream_usage} if stream_usage is not None else None
-            self.last_stream_meta = self._llm_meta(
-                resolved, meta_response, latency_ms, fallback_attempts
-            )
-            return
-
+                self.last_stream_meta = self._llm_meta(
+                    resolved, meta_response, latency_ms, fallback_attempts
+                )
+                return
+            # All inner retries exhausted — skip to next candidate
+            continue
         if last_error is not None:
-            raise last_error
+            raise last_error  # type: ignore[misc]
         if skipped:
             raise RuntimeError(
                 "all fallback candidates skipped because no API key was available"
